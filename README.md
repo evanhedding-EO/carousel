@@ -3,14 +3,26 @@
 Minimal C / SOEM tool for bringing up a STEPPERONLINE CL57EC (YAKO OEM) over
 EtherCAT. Built in milestones; this stage is **SDO only — no motion**.
 
+Targets **SOEM 2.0** (context-based `ecx_*` API).
+
 ## Build (Linux)
 
+Expects SOEM 2.0 checked out as a sibling of this repo, i.e. `../SOEM`
+(override with `make SOEM=/path/to/SOEM`). No CMake needed — the Makefile
+compiles SOEM's sources directly and ships SOEM's build-options header at
+`soem_config/soem/ec_options.h`.
+
 ```sh
-git clone https://github.com/OpenEtherCATsociety/SOEM   # into this folder -> ./SOEM
-cmake -B build && cmake --build build
+make
 ```
 
-Binary lands at `build/carousel`.
+Binary lands at `build/carousel`. Layout assumed:
+
+```
+carousel_testing/
+  SOEM/        # SOEM 2.0 checkout
+  carousel/    # this repo  -> run `make` here
+```
 
 ## Permissions
 
@@ -39,7 +51,7 @@ Find your NIC name with `ip link` (e.g. `eth0`, `enp3s0`).
 ### Suggested first run
 
 ```sh
-sudo ./build/carousel eth0 scan        # confirm the CL57EC enumerates
+sudo ./build/carousel eth0 scan        # confirm the drive enumerates (note its product code)
 sudo ./build/carousel eth0 params      # read current config
 sudo ./build/carousel eth0 inputs      # hand-spin carousel, watch HOME toggle
 # set motor current (use YOUR motor's rating in mA), confirms with read-back:
