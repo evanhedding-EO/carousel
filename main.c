@@ -132,6 +132,39 @@ static int cmd_inputs(void)
     return 0;
 }
 
+/* ---- read the drive's ACTUAL PDO mapping (the ESI XML did not match) ----- */
+static void dump_pdo_assign(uint16_t sm_assign, const char *label)
+{
+    uint8_t npdo = 0;
+    if (!sdo_read(SLAVE, sm_assign, 0, &npdo, 1)) {
+        printf("  %s (0x%04X): read failed\n", label, sm_assign);
+        return;
+    }
+    printf("  %s (0x%04X): %u PDO(s)\n", label, sm_assign, npdo);
+    int byteoff = 0;
+    for (uint8_t p = 1; p <= npdo; p++) {
+        uint16_t pdo = 0;
+        sdo_read(SLAVE, sm_assign, p, &pdo, 2);
+        uint8_t nent = 0;
+        sdo_read(SLAVE, pdo, 0, &nent, 1);
+        printf("    PDO 0x%04X: %u entries\n", pdo, nent);
+        for (uint8_t e = 1; e <= nent; e++) {
+            uint32_t m = 0;                          /* packed: index<<16 | sub<<8 | bitlen */
+            sdo_read(SLAVE, pdo, e, &m, 4);
+            printf("      byte %2d : 0x%04X:%u  %2u bits\n",
+                   byteoff, (uint16_t)(m >> 16), (uint8_t)(m >> 8), (uint8_t)m);
+            byteoff += (uint8_t)m / 8;
+        }
+    }
+}
+
+static int cmd_pdomap(void)
+{
+    dump_pdo_assign(0x1C12, "RxPDO outputs (master->drive)");
+    dump_pdo_assign(0x1C13, "TxPDO inputs  (drive->master)");
+    return 0;
+}
+
 /* ---- milestone 2: enable at zero velocity (no motion) ------------------- */
 static const char *cia402_state(uint16_t sw)
 {
@@ -220,8 +253,9 @@ static void usage(const char *p)
         "  %s <ifname> sdo get <idxHex> <sub> <type>\n"
         "  %s <ifname> sdo set <idxHex> <sub> <type> <val>\n"
         "  %s <ifname> inputs\n"
+        "  %s <ifname> pdomap                 (print the drive's actual PDO mapping)\n"
         "  %s <ifname> enable                 (energize at zero velocity; no motion)\n"
-        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p);
+        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p, p);
 }
 
 int main(int argc, char **argv)
@@ -240,6 +274,8 @@ int main(int argc, char **argv)
         rc = cmd_params();
     } else if (!strcmp(cmd, "inputs")) {
         rc = cmd_inputs();
+    } else if (!strcmp(cmd, "pdomap")) {
+        rc = cmd_pdomap();
     } else if (!strcmp(cmd, "enable")) {
         rc = cmd_enable();
     } else if (!strcmp(cmd, "sdo") && argc >= 4) {

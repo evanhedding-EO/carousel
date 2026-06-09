@@ -132,5 +132,7 @@ void bus_set_controlword(uint16_t cw)
 uint16_t bus_statusword(void)
 {
     const uint8 *in = ctx.slavelist[1].inputs;
-    return in ? (uint16_t)(in[2] | (in[3] << 8)) : 0;   /* 6041h at TxPDO offset 2 */
+    /* Firmware's real TxPDO starts with StatusWord at offset 0 (the ESI's 39-byte
+     * 0x1A00 with a leading ErrorCode does NOT match this drive - verified by 'pdomap'). */
+    return in ? (uint16_t)(in[0] | (in[1] << 8)) : 0;
 }
