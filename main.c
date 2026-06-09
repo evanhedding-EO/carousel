@@ -155,6 +155,13 @@ static int cmd_enable(void)
     int8_t mode = 3;                                 /* PV mode; target velocity stays 0 */
     sdo_write(SLAVE, 0x6060, 0, &mode, 1);
 
+    /* The drive defaults to DC-SYNC0, which our non-RT loop can't provide, so it
+     * drops out of OP after a few seconds. Force SM-synchronous mode (no DC);
+     * the ESI lists SM-Synchron with AssignActivate=0, so it's supported. */
+    uint16_t sync_type = 1;                          /* 0=free-run, 1=SM-synchronous, 2=DC */
+    sdo_write(SLAVE, 0x1C32, 1, &sync_type, 2);      /* outputs SM */
+    sdo_write(SLAVE, 0x1C33, 1, &sync_type, 2);      /* inputs SM */
+
     if (!bus_enter_op()) return 1;
     printf("OP reached. Enabling (PV mode, target velocity = 0 -> no motion)...\n");
 
@@ -181,9 +188,18 @@ static int cmd_enable(void)
     else fprintf(stderr, "did NOT reach OperationEnabled: status=0x%04X (%s)\n",
                  sw, cia402_state(sw));
 
-    while (g_run && enabled) {                        /* hold enabled */
+    int bad = 0;
+    while (g_run && enabled) {                        /* hold enabled; watch for a drop */
         bus_set_controlword(0x000F);
         bus_cycle();
+        uint16_t hs = bus_statusword();
+        if ((hs & 0x6F) == 0x27) {
+            bad = 0;
+        } else if (++bad >= 10) {                     /* ~20 ms of non-OP -> report and stop */
+            fprintf(stderr, "\ndrive left OperationEnabled: status=0x%04X (%s)\n",
+                    hs, cia402_state(hs));
+            enabled = 0;
+        }
         usleep(2000);
     }
 
