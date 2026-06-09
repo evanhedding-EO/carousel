@@ -1,10 +1,13 @@
-/* carousel - CL57EC EtherCAT test tool (milestones 0-1b: SDO only, no motion).
+/* carousel - CL57EC EtherCAT test tool.
  *
  *   carousel <ifname> scan                       enumerate the bus
  *   carousel <ifname> params                      read key config objects (read-only)
  *   carousel <ifname> sdo get <idx> <sub> <type>  read one object
  *   carousel <ifname> sdo set <idx> <sub> <type> <val>   write one object
  *   carousel <ifname> inputs                      live digital-input bits (60FD)
+ *   carousel <ifname> pdomap                       print the drive's real PDO mapping
+ *   carousel <ifname> enable                       energize at zero velocity (no motion)
+ *   carousel <ifname> spin <counts/s>              PV-mode rotation (10000 = 1 rev/s)
  *
  * <idx> is hex (e.g. 2401), <sub> is decimal, <val> is decimal or 0x-hex.
  * <type> is one of: u8 u16 u32 i8 i16 i32
@@ -21,6 +24,26 @@
 #include <stdint.h>
 
 #define SLAVE 1
+
+/* CiA 402 control word (6040h) commands */
+#define CW_SHUTDOWN           0x0006
+#define CW_SWITCH_ON          0x0007
+#define CW_ENABLE_OP          0x000F
+#define CW_QUICK_STOP         0x0002
+#define CW_DISABLE_VOLTAGE    0x0000
+#define CW_FAULT_RESET        0x0080
+
+/* CiA 402 status word (6041h): the state lives in bits 0-3,5,6 -> mask 0x6F */
+#define SW_MASK               0x006F
+#define SW_FAULT_BIT          0x0008
+#define SW_SWITCH_ON_DISABLED 0x0040
+#define SW_READY_TO_SWITCH_ON 0x0021
+#define SW_SWITCHED_ON        0x0023
+#define SW_OPERATION_ENABLED  0x0027
+#define SW_QUICK_STOP_ACTIVE  0x0007
+
+/* Modes of operation (6060h) */
+#define MODE_PV               3        /* Profile Velocity */
 
 static volatile sig_atomic_t g_run = 1;
 static void on_sigint(int sig) { (void)sig; g_run = 0; }
@@ -165,82 +188,124 @@ static int cmd_pdomap(void)
     return 0;
 }
 
-/* ---- milestone 2: enable at zero velocity (no motion) ------------------- */
+/* ---- milestones 2-3: CiA402 enable / motion ----------------------------- */
 static const char *cia402_state(uint16_t sw)
 {
-    switch (sw & 0x6F) {
-    case 0x00: case 0x20: return "NotReadyToSwitchOn";
-    case 0x40: case 0x60: return "SwitchOnDisabled";
-    case 0x21:            return "ReadyToSwitchOn";
-    case 0x23:            return "SwitchedOn";
-    case 0x27:            return "OperationEnabled";
-    case 0x07:            return "QuickStopActive";
-    case 0x0F: case 0x2F: return "FaultReactionActive";
-    case 0x08: case 0x28: return "Fault";
-    default:              return "?";
+    switch (sw & SW_MASK) {
+    case 0x00: case 0x20:        return "NotReadyToSwitchOn";
+    case SW_SWITCH_ON_DISABLED:
+    case 0x60:                   return "SwitchOnDisabled";
+    case SW_READY_TO_SWITCH_ON:  return "ReadyToSwitchOn";
+    case SW_SWITCHED_ON:         return "SwitchedOn";
+    case SW_OPERATION_ENABLED:   return "OperationEnabled";
+    case SW_QUICK_STOP_ACTIVE:   return "QuickStopActive";
+    case 0x0F: case 0x2F:        return "FaultReactionActive";
+    case SW_FAULT_BIT: case 0x28:return "Fault";
+    default:                     return "?";
     }
+}
+
+/* Walk the state machine to OperationEnabled, holding `mode` in the cyclic PDO.
+ * Returns 1 if enabled, 0 on timeout/abort. */
+static int cia402_enable(int8_t mode)
+{
+    int enabled = 0;
+    for (int i = 0; i < 1000 && g_run && !enabled; i++) {
+        uint16_t sw = bus_statusword(), cw;
+        if (sw & SW_FAULT_BIT)              cw = CW_FAULT_RESET;
+        else switch (sw & SW_MASK) {
+            case SW_READY_TO_SWITCH_ON:     cw = CW_SWITCH_ON; break;
+            case SW_SWITCHED_ON:            cw = CW_ENABLE_OP; break;
+            case SW_OPERATION_ENABLED:      cw = CW_ENABLE_OP; enabled = 1; break;
+            default:                        cw = CW_SHUTDOWN;  break;  /* incl. SwitchOnDisabled */
+        }
+        bus_set_controlword(cw);
+        bus_set_mode(mode);
+        bus_cycle();
+        usleep(2000);
+    }
+    return enabled;
+}
+
+/* Ramp target velocity to 0, let the drive decelerate, then de-energize. */
+static void cia402_disable(void)
+{
+    printf("\nstopping (ramp to 0) and disabling...\n");
+    bus_set_target_velocity(0);
+    for (int i = 0; i < 1500; i++) {                 /* up to ~3 s to coast down */
+        bus_set_controlword(CW_ENABLE_OP);
+        bus_set_target_velocity(0);
+        bus_cycle();
+        if (labs(bus_velocity_actual()) < 50) break;
+        usleep(2000);
+    }
+    for (int i = 0; i < 10; i++) { bus_set_controlword(CW_DISABLE_VOLTAGE); bus_cycle(); usleep(2000); }
 }
 
 static int cmd_enable(void)
 {
     signal(SIGINT, on_sigint);
-
-    int8_t mode = 3;                                 /* PV mode; target velocity stays 0 */
-    sdo_write(SLAVE, 0x6060, 0, &mode, 1);
-
-    /* Sync mode is NOT selectable by SDO here - 0x1C32:01/0x1C33:01 are read-only
-     * in this drive's dictionary (Function Manual p96-97). DC is activated by the
-     * master via the DC registers, which bus_enter_op() does (configdc + dcsync0). */
-
     if (!bus_enter_op()) return 1;
     printf("OP reached. Enabling (PV mode, target velocity = 0 -> no motion)...\n");
-    bus_debug();   /* one-shot: is the input PDO actually being received? */
+    bus_debug();
 
-    /* CiA402 bring-up: derive next controlword from the current statusword. */
-    int enabled = 0;
-    for (int i = 0; i < 1000 && g_run && !enabled; i++) {
-        uint16_t sw = bus_statusword(), cw;
-        if (sw & 0x0008)                cw = 0x0080;            /* Fault -> reset */
-        else switch (sw & 0x6F) {
-            case 0x40: case 0x60:       cw = 0x0006; break;     /* SwitchOnDisabled -> Shutdown */
-            case 0x21:                  cw = 0x0007; break;     /* Ready -> SwitchOn */
-            case 0x23:                  cw = 0x000F; break;     /* SwitchedOn -> EnableOp */
-            case 0x27:                  cw = 0x000F; enabled = 1; break;  /* OperationEnabled */
-            default:                    cw = 0x0006; break;
-        }
-        bus_set_controlword(cw);
-        bus_cycle();
-        usleep(2000);
-    }
-
+    bus_set_target_velocity(0);
+    int enabled = cia402_enable(MODE_PV);
     uint16_t sw = bus_statusword();
-    if (enabled) printf("ENABLED: status=0x%04X (%s). Holding (motor energized). Ctrl-C to stop.\n",
-                        sw, cia402_state(sw));
-    else {
-        fprintf(stderr, "did NOT reach OperationEnabled: status=0x%04X (%s)\n",
-                sw, cia402_state(sw));
+    if (!enabled) {
+        fprintf(stderr, "did NOT reach OperationEnabled: status=0x%04X (%s)\n", sw, cia402_state(sw));
         bus_report_state("enable failed");
+        return 1;
     }
+    printf("ENABLED: status=0x%04X (%s). Holding (motor energized). Ctrl-C to stop.\n",
+           sw, cia402_state(sw));
 
     int bad = 0;
-    while (g_run && enabled) {                        /* hold enabled; watch for a drop */
-        bus_set_controlword(0x000F);
+    while (g_run) {                                   /* hold; watch for a drop */
+        bus_set_controlword(CW_ENABLE_OP);
+        bus_set_mode(MODE_PV);
         bus_cycle();
         uint16_t hs = bus_statusword();
-        if ((hs & 0x6F) == 0x27) {
-            bad = 0;
-        } else if (++bad >= 10) {                     /* ~20 ms of non-OP -> report and stop */
-            fprintf(stderr, "\ndrive left OperationEnabled: status=0x%04X (%s)\n",
-                    hs, cia402_state(hs));
-            enabled = 0;
+        if ((hs & SW_MASK) == SW_OPERATION_ENABLED) bad = 0;
+        else if (++bad >= 10) {
+            fprintf(stderr, "\ndrive left OperationEnabled: status=0x%04X (%s)\n", hs, cia402_state(hs));
+            break;
         }
         usleep(2000);
     }
+    cia402_disable();
+    return 0;
+}
 
-    printf("\ndisabling (quick stop -> disable voltage)...\n");
-    for (int i = 0; i < 50; i++) { bus_set_controlword(0x0002); bus_cycle(); usleep(2000); }
-    for (int i = 0; i < 10; i++) { bus_set_controlword(0x0000); bus_cycle(); usleep(2000); }
-    return enabled ? 0 : 1;
+static int cmd_spin(int32_t vel)
+{
+    signal(SIGINT, on_sigint);
+    if (!bus_enter_op()) return 1;
+    printf("OP reached. Enabling for PV spin...\n");
+
+    bus_set_target_velocity(0);                       /* enable at 0, then ramp up */
+    if (!cia402_enable(MODE_PV)) {
+        uint16_t sw = bus_statusword();
+        fprintf(stderr, "enable failed: status=0x%04X (%s)\n", sw, cia402_state(sw));
+        bus_report_state("spin enable failed");
+        return 1;
+    }
+    printf("SPINNING at %d counts/s (~%.2f rev/s, 10000 cnt/rev). Ctrl-C to stop.\n",
+           vel, vel / 10000.0);
+
+    int tick = 0;
+    while (g_run) {
+        bus_set_controlword(CW_ENABLE_OP);
+        bus_set_mode(MODE_PV);
+        bus_set_target_velocity(vel);
+        bus_cycle();
+        if (++tick % 250 == 0)                        /* ~every 0.5 s */
+            printf("\r  target=%d  actual=%d counts/s   ", vel, bus_velocity_actual());
+        fflush(stdout);
+        usleep(2000);
+    }
+    cia402_disable();
+    return 0;
 }
 
 /* ---- dispatch ----------------------------------------------------------- */
@@ -255,7 +320,8 @@ static void usage(const char *p)
         "  %s <ifname> inputs\n"
         "  %s <ifname> pdomap                 (print the drive's actual PDO mapping)\n"
         "  %s <ifname> enable                 (energize at zero velocity; no motion)\n"
-        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p, p);
+        "  %s <ifname> spin <counts/s>        (PV mode; 10000 = 1 rev/s)\n"
+        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p, p, p);
 }
 
 int main(int argc, char **argv)
@@ -278,6 +344,8 @@ int main(int argc, char **argv)
         rc = cmd_pdomap();
     } else if (!strcmp(cmd, "enable")) {
         rc = cmd_enable();
+    } else if (!strcmp(cmd, "spin") && argc == 4) {
+        rc = cmd_spin((int32_t)strtol(argv[3], NULL, 0));
     } else if (!strcmp(cmd, "sdo") && argc >= 4) {
         const char *op = argv[3];
         if (!strcmp(op, "get") && argc == 7) {

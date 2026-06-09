@@ -126,7 +126,20 @@ void bus_debug(void)
 void bus_set_controlword(uint16_t cw)
 {
     uint8 *o = ctx.slavelist[1].outputs;
-    if (o) { o[0] = (uint8)cw; o[1] = (uint8)(cw >> 8); }
+    if (o) { o[0] = (uint8)cw; o[1] = (uint8)(cw >> 8); }   /* 6040h @ offset 0 */
+}
+
+void bus_set_mode(int8_t mode)
+{
+    uint8 *o = ctx.slavelist[1].outputs;
+    if (o) o[10] = (uint8)mode;                             /* 6060h @ offset 10 */
+}
+
+void bus_set_target_velocity(int32_t v)
+{
+    uint8 *o = ctx.slavelist[1].outputs;
+    if (o) { o[6] = (uint8)v; o[7] = (uint8)(v >> 8);       /* 60FFh @ offset 6 */
+             o[8] = (uint8)(v >> 16); o[9] = (uint8)(v >> 24); }
 }
 
 uint16_t bus_statusword(void)
@@ -135,4 +148,12 @@ uint16_t bus_statusword(void)
     /* Firmware's real TxPDO starts with StatusWord at offset 0 (the ESI's 39-byte
      * 0x1A00 with a leading ErrorCode does NOT match this drive - verified by 'pdomap'). */
     return in ? (uint16_t)(in[0] | (in[1] << 8)) : 0;
+}
+
+int32_t bus_velocity_actual(void)
+{
+    const uint8 *in = ctx.slavelist[1].inputs;             /* 606Ch @ offset 6 */
+    if (!in) return 0;
+    return (int32_t)((uint32_t)in[6] | ((uint32_t)in[7] << 8) |
+                     ((uint32_t)in[8] << 16) | ((uint32_t)in[9] << 24));
 }
