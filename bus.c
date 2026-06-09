@@ -60,3 +60,60 @@ int sdo_write(uint16_t s, uint16_t idx, uint8_t sub, const void *buf, int size)
     int wkc = ecx_SDOwrite(&ctx, s, idx, sub, FALSE, size, (void *)buf, EC_TIMEOUTRXM);
     return wkc > 0;
 }
+
+/* --- cyclic process data / OP --- */
+static uint8 IOmap[256];   /* drive needs 16 out + 39 in; plenty of room */
+
+static void report_state(const char *what)
+{
+    ecx_readstate(&ctx);
+    fprintf(stderr, "bus: %s (state=0x%02X AL=0x%04X: %s)\n", what,
+            (unsigned)ctx.slavelist[1].state, (unsigned)ctx.slavelist[1].ALstatuscode,
+            ec_ALstatuscode2string(ctx.slavelist[1].ALstatuscode));
+}
+
+int bus_enter_op(void)
+{
+    if (ecx_config_map_group(&ctx, IOmap, 0) <= 0) {
+        fprintf(stderr, "bus: config_map failed\n");
+        return 0;
+    }
+    ecx_statecheck(&ctx, 0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE);
+    if (ctx.slavelist[0].state != EC_STATE_SAFE_OP) {
+        report_state("did not reach SAFE-OP");
+        return 0;
+    }
+    /* OP needs live process data: prime one frame, request OP, keep cycling. */
+    ecx_send_processdata(&ctx);
+    ecx_receive_processdata(&ctx, EC_TIMEOUTRET);
+    ctx.slavelist[0].state = EC_STATE_OPERATIONAL;
+    ecx_writestate(&ctx, 0);
+    for (int i = 0; i < 200 && ctx.slavelist[0].state != EC_STATE_OPERATIONAL; i++) {
+        ecx_send_processdata(&ctx);
+        ecx_receive_processdata(&ctx, EC_TIMEOUTRET);
+        ecx_statecheck(&ctx, 0, EC_STATE_OPERATIONAL, 50000);
+    }
+    if (ctx.slavelist[0].state != EC_STATE_OPERATIONAL) {
+        report_state("failed to reach OP");
+        return 0;
+    }
+    return 1;
+}
+
+void bus_cycle(void)
+{
+    ecx_send_processdata(&ctx);
+    ecx_receive_processdata(&ctx, EC_TIMEOUTRET);
+}
+
+void bus_set_controlword(uint16_t cw)
+{
+    uint8 *o = ctx.slavelist[1].outputs;
+    if (o) { o[0] = (uint8)cw; o[1] = (uint8)(cw >> 8); }
+}
+
+uint16_t bus_statusword(void)
+{
+    const uint8 *in = ctx.slavelist[1].inputs;
+    return in ? (uint16_t)(in[2] | (in[3] << 8)) : 0;   /* 6041h at TxPDO offset 2 */
+}

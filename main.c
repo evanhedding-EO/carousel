@@ -132,6 +132,67 @@ static int cmd_inputs(void)
     return 0;
 }
 
+/* ---- milestone 2: enable at zero velocity (no motion) ------------------- */
+static const char *cia402_state(uint16_t sw)
+{
+    switch (sw & 0x6F) {
+    case 0x00: case 0x20: return "NotReadyToSwitchOn";
+    case 0x40: case 0x60: return "SwitchOnDisabled";
+    case 0x21:            return "ReadyToSwitchOn";
+    case 0x23:            return "SwitchedOn";
+    case 0x27:            return "OperationEnabled";
+    case 0x07:            return "QuickStopActive";
+    case 0x0F: case 0x2F: return "FaultReactionActive";
+    case 0x08: case 0x28: return "Fault";
+    default:              return "?";
+    }
+}
+
+static int cmd_enable(void)
+{
+    signal(SIGINT, on_sigint);
+
+    int8_t mode = 3;                                 /* PV mode; target velocity stays 0 */
+    sdo_write(SLAVE, 0x6060, 0, &mode, 1);
+
+    if (!bus_enter_op()) return 1;
+    printf("OP reached. Enabling (PV mode, target velocity = 0 -> no motion)...\n");
+
+    /* CiA402 bring-up: derive next controlword from the current statusword. */
+    int enabled = 0;
+    for (int i = 0; i < 1000 && g_run && !enabled; i++) {
+        uint16_t sw = bus_statusword(), cw;
+        if (sw & 0x0008)                cw = 0x0080;            /* Fault -> reset */
+        else switch (sw & 0x6F) {
+            case 0x40: case 0x60:       cw = 0x0006; break;     /* SwitchOnDisabled -> Shutdown */
+            case 0x21:                  cw = 0x0007; break;     /* Ready -> SwitchOn */
+            case 0x23:                  cw = 0x000F; break;     /* SwitchedOn -> EnableOp */
+            case 0x27:                  cw = 0x000F; enabled = 1; break;  /* OperationEnabled */
+            default:                    cw = 0x0006; break;
+        }
+        bus_set_controlword(cw);
+        bus_cycle();
+        usleep(2000);
+    }
+
+    uint16_t sw = bus_statusword();
+    if (enabled) printf("ENABLED: status=0x%04X (%s). Holding (motor energized). Ctrl-C to stop.\n",
+                        sw, cia402_state(sw));
+    else fprintf(stderr, "did NOT reach OperationEnabled: status=0x%04X (%s)\n",
+                 sw, cia402_state(sw));
+
+    while (g_run && enabled) {                        /* hold enabled */
+        bus_set_controlword(0x000F);
+        bus_cycle();
+        usleep(2000);
+    }
+
+    printf("\ndisabling (quick stop -> disable voltage)...\n");
+    for (int i = 0; i < 50; i++) { bus_set_controlword(0x0002); bus_cycle(); usleep(2000); }
+    for (int i = 0; i < 10; i++) { bus_set_controlword(0x0000); bus_cycle(); usleep(2000); }
+    return enabled ? 0 : 1;
+}
+
 /* ---- dispatch ----------------------------------------------------------- */
 static void usage(const char *p)
 {
@@ -142,7 +203,8 @@ static void usage(const char *p)
         "  %s <ifname> sdo get <idxHex> <sub> <type>\n"
         "  %s <ifname> sdo set <idxHex> <sub> <type> <val>\n"
         "  %s <ifname> inputs\n"
-        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p);
+        "  %s <ifname> enable                 (energize at zero velocity; no motion)\n"
+        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p);
 }
 
 int main(int argc, char **argv)
@@ -161,6 +223,8 @@ int main(int argc, char **argv)
         rc = cmd_params();
     } else if (!strcmp(cmd, "inputs")) {
         rc = cmd_inputs();
+    } else if (!strcmp(cmd, "enable")) {
+        rc = cmd_enable();
     } else if (!strcmp(cmd, "sdo") && argc >= 4) {
         const char *op = argv[3];
         if (!strcmp(op, "get") && argc == 7) {
