@@ -8,6 +8,7 @@
  *   carousel <ifname> pdomap                       print the drive's real PDO mapping
  *   carousel <ifname> enable                       energize at zero velocity (no motion)
  *   carousel <ifname> spin <counts/s>              PV-mode rotation (10000 = 1 rev/s)
+ *   carousel <ifname> move <counts>                PP relative move (10000 = 1 rev)
  *
  * <idx> is hex (e.g. 2401), <sub> is decimal, <val> is decimal or 0x-hex.
  * <type> is one of: u8 u16 u32 i8 i16 i32
@@ -33,6 +34,10 @@
 #define CW_DISABLE_VOLTAGE    0x0000
 #define CW_FAULT_RESET        0x0080
 
+/* control word bits used in Profile Position mode */
+#define CW_NEW_SETPOINT       0x0010   /* bit4 */
+#define CW_RELATIVE           0x0040   /* bit6: target is relative */
+
 /* CiA 402 status word (6041h): the state lives in bits 0-3,5,6 -> mask 0x6F */
 #define SW_MASK               0x006F
 #define SW_FAULT_BIT          0x0008
@@ -41,8 +46,11 @@
 #define SW_SWITCHED_ON        0x0023
 #define SW_OPERATION_ENABLED  0x0027
 #define SW_QUICK_STOP_ACTIVE  0x0007
+#define SW_TARGET_REACHED     0x0400   /* bit10 */
+#define SW_SETPOINT_ACK       0x1000   /* bit12 */
 
 /* Modes of operation (6060h) */
+#define MODE_PP               1        /* Profile Position */
 #define MODE_PV               3        /* Profile Velocity */
 
 static volatile sig_atomic_t g_run = 1;
@@ -308,6 +316,69 @@ static int cmd_spin(int32_t vel)
     return 0;
 }
 
+/* Profile-Position move with the proper new-set-point handshake.
+ * Returns 1 if target-reached, 0 on timeout/abort. Must already be OperationEnabled. */
+static int pp_move(int32_t target, int relative)
+{
+    uint16_t trig = CW_ENABLE_OP | CW_NEW_SETPOINT | (relative ? CW_RELATIVE : 0);
+
+    bus_set_controlword(CW_ENABLE_OP);                /* ensure new-set-point low */
+    bus_set_mode(MODE_PP);
+    bus_set_target_position(target);
+    bus_cycle();
+
+    int acked = 0;                                    /* rising edge -> wait set-point ack (bit12) */
+    for (int i = 0; i < 1000 && g_run; i++) {
+        bus_set_controlword(trig);
+        bus_set_mode(MODE_PP);
+        bus_set_target_position(target);
+        bus_cycle();
+        if (bus_statusword() & SW_SETPOINT_ACK) { acked = 1; break; }
+        usleep(2000);
+    }
+    bus_set_controlword(CW_ENABLE_OP);                /* drop new-set-point (handshake) */
+    bus_set_mode(MODE_PP);
+    bus_cycle();
+    if (!acked) return 0;
+
+    for (int i = 0; i < 5000 && g_run; i++) {         /* wait target reached (bit10), up to ~10 s */
+        bus_set_controlword(CW_ENABLE_OP);
+        bus_set_mode(MODE_PP);
+        bus_cycle();
+        if (bus_statusword() & SW_TARGET_REACHED) return 1;
+        usleep(2000);
+    }
+    return 0;
+}
+
+static int cmd_move(int32_t delta)
+{
+    signal(SIGINT, on_sigint);
+
+    uint32_t pv = 10000, acc = 100000, dec = 100000; /* slow: 1 rev/s profile (not in PDO) */
+    sdo_write(SLAVE, 0x6081, 0, &pv, 4);             /* profile velocity */
+    sdo_write(SLAVE, 0x6083, 0, &acc, 4);            /* profile acceleration */
+    sdo_write(SLAVE, 0x6084, 0, &dec, 4);            /* profile deceleration */
+
+    if (!bus_enter_op()) return 1;
+    if (!cia402_enable(MODE_PP)) {
+        uint16_t sw = bus_statusword();
+        fprintf(stderr, "enable failed: status=0x%04X (%s)\n", sw, cia402_state(sw));
+        bus_report_state("move enable failed");
+        return 1;
+    }
+
+    int32_t start = bus_position_actual();
+    printf("PP relative move %+d counts (%.2f rev) from %d ...\n", delta, delta / 10000.0, start);
+    int reached = pp_move(delta, 1);
+    int32_t end = bus_position_actual();
+    printf("%s: %d -> %d (moved %+d, wanted %+d)\n",
+           reached ? "target reached" : "NOT reached (timeout/abort)", start, end, end - start, delta);
+
+    cia402_disable();
+    return 0;
+}
+
 /* ---- dispatch ----------------------------------------------------------- */
 static void usage(const char *p)
 {
@@ -321,7 +392,8 @@ static void usage(const char *p)
         "  %s <ifname> pdomap                 (print the drive's actual PDO mapping)\n"
         "  %s <ifname> enable                 (energize at zero velocity; no motion)\n"
         "  %s <ifname> spin <counts/s>        (PV mode; 10000 = 1 rev/s)\n"
-        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p, p, p);
+        "  %s <ifname> move <counts>          (PP relative move; 10000 = 1 rev)\n"
+        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p, p, p, p);
 }
 
 int main(int argc, char **argv)
@@ -346,6 +418,8 @@ int main(int argc, char **argv)
         rc = cmd_enable();
     } else if (!strcmp(cmd, "spin") && argc == 4) {
         rc = cmd_spin((int32_t)strtol(argv[3], NULL, 0));
+    } else if (!strcmp(cmd, "move") && argc == 4) {
+        rc = cmd_move((int32_t)strtol(argv[3], NULL, 0));
     } else if (!strcmp(cmd, "sdo") && argc >= 4) {
         const char *op = argv[3];
         if (!strcmp(op, "get") && argc == 7) {

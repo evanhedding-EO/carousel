@@ -27,8 +27,10 @@ void     bus_cycle(void);                 /* exchange one PDO frame (send + rece
 void     bus_set_controlword(uint16_t cw);
 void     bus_set_mode(int8_t mode);
 void     bus_set_target_velocity(int32_t v);
+void     bus_set_target_position(int32_t p);
 uint16_t bus_statusword(void);
 int32_t  bus_velocity_actual(void);
+int32_t  bus_position_actual(void);
 void     bus_report_state(const char *what);/* print slave 1 EtherCAT state + AL code */
 void     bus_debug(void);                 /* one-shot: WKC, mapped I/O sizes, raw input bytes */
 

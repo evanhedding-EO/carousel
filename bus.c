@@ -142,6 +142,13 @@ void bus_set_target_velocity(int32_t v)
              o[8] = (uint8)(v >> 16); o[9] = (uint8)(v >> 24); }
 }
 
+void bus_set_target_position(int32_t p)
+{
+    uint8 *o = ctx.slavelist[1].outputs;
+    if (o) { o[2] = (uint8)p; o[3] = (uint8)(p >> 8);       /* 607Ah @ offset 2 */
+             o[4] = (uint8)(p >> 16); o[5] = (uint8)(p >> 24); }
+}
+
 uint16_t bus_statusword(void)
 {
     const uint8 *in = ctx.slavelist[1].inputs;
@@ -156,4 +163,12 @@ int32_t bus_velocity_actual(void)
     if (!in) return 0;
     return (int32_t)((uint32_t)in[6] | ((uint32_t)in[7] << 8) |
                      ((uint32_t)in[8] << 16) | ((uint32_t)in[9] << 24));
+}
+
+int32_t bus_position_actual(void)
+{
+    const uint8 *in = ctx.slavelist[1].inputs;             /* 6064h @ offset 2 */
+    if (!in) return 0;
+    return (int32_t)((uint32_t)in[2] | ((uint32_t)in[3] << 8) |
+                     ((uint32_t)in[4] << 16) | ((uint32_t)in[5] << 24));
 }
