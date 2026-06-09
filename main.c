@@ -161,6 +161,7 @@ static int cmd_enable(void)
 
     if (!bus_enter_op()) return 1;
     printf("OP reached. Enabling (PV mode, target velocity = 0 -> no motion)...\n");
+    bus_debug();   /* one-shot: is the input PDO actually being received? */
 
     /* CiA402 bring-up: derive next controlword from the current statusword. */
     int enabled = 0;

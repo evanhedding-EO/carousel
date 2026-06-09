@@ -111,6 +111,18 @@ void bus_cycle(void)
     ecx_receive_processdata(&ctx, EC_TIMEOUTRET);
 }
 
+void bus_debug(void)
+{
+    ecx_send_processdata(&ctx);
+    int wkc = ecx_receive_processdata(&ctx, EC_TIMEOUTRET);
+    ec_slavet *s = &ctx.slavelist[1];
+    int exp = ctx.grouplist[0].outputsWKC * 2 + ctx.grouplist[0].inputsWKC;
+    printf("io: wkc=%d (expected %d)  Obytes=%u Ibytes=%u  inputs:",
+           wkc, exp, (unsigned)s->Obytes, (unsigned)s->Ibytes);
+    for (uint32 i = 0; i < s->Ibytes && i < 16; i++) printf(" %02X", s->inputs[i]);
+    printf("\n");
+}
+
 void bus_set_controlword(uint16_t cw)
 {
     uint8 *o = ctx.slavelist[1].outputs;
