@@ -23,5 +23,6 @@ int      bus_enter_op(void);              /* config_map + SAFE-OP -> OP; 1 ok, 0
 void     bus_cycle(void);                 /* exchange one PDO frame (send + receive) */
 void     bus_set_controlword(uint16_t cw);/* RxPDO 0x1600: 6040h at offset 0 */
 uint16_t bus_statusword(void);            /* TxPDO 0x1A00: 6041h at offset 2 */
+void     bus_report_state(const char *what);/* print slave 1 EtherCAT state + AL code */
 
 #endif /* BUS_H */
