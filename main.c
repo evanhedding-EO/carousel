@@ -667,6 +667,8 @@ int main(int argc, char **argv)
     } else if (!strcmp(cmd, "home")) {
         int8_t method = (argc == 4) ? (int8_t)strtol(argv[3], NULL, 0) : HOME_METHOD;
         rc = cmd_home(method);
+    } else if (!strcmp(cmd, "session")) {
+        rc = cmd_session();
     } else if (!strcmp(cmd, "sdo") && argc >= 4) {
         const char *op = argv[3];
         if (!strcmp(op, "get") && argc == 7) {
