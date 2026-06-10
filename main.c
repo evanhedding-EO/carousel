@@ -9,6 +9,7 @@
  *   carousel <ifname> enable                       energize at zero velocity (no motion)
  *   carousel <ifname> spin <counts/s>              PV-mode rotation (10000 = 1 rev/s)
  *   carousel <ifname> move <counts>                PP relative move (10000 = 1 rev)
+ *   carousel <ifname> home [method]                homing to the sensor flag
  *
  * <idx> is hex (e.g. 2401), <sub> is decimal, <val> is decimal or 0x-hex.
  * <type> is one of: u8 u16 u32 i8 i16 i32
@@ -47,11 +48,21 @@
 #define SW_OPERATION_ENABLED  0x0027
 #define SW_QUICK_STOP_ACTIVE  0x0007
 #define SW_TARGET_REACHED     0x0400   /* bit10 */
-#define SW_SETPOINT_ACK       0x1000   /* bit12 */
+#define SW_SETPOINT_ACK       0x1000   /* bit12, Profile Position */
+#define SW_HOMING_ATTAINED    0x1000   /* bit12, Homing mode (same bit, mode-specific) */
+#define SW_HOMING_ERROR       0x2000   /* bit13, Homing mode */
 
 /* Modes of operation (6060h) */
 #define MODE_PP               1        /* Profile Position */
 #define MODE_PV               3        /* Profile Velocity */
+#define MODE_HOME             6        /* Homing */
+
+/* Homing defaults (tune during bring-up; method also overridable on the CLI) */
+#define HOME_METHOD           21       /* home-switch only, no index (mid-travel flag) */
+#define HOME_SPEED_FAST       10000    /* 6099:1 search-for-switch, counts/s (1 rev/s) */
+#define HOME_SPEED_SLOW       2000     /* 6099:2 latch speed, counts/s (slow = repeatable) */
+#define HOME_ACCEL            50000    /* 609Ah */
+#define HOME_OFFSET           0        /* 607Ch: counts from latched edge to station 0 */
 
 static volatile sig_atomic_t g_run = 1;
 static void on_sigint(int sig) { (void)sig; g_run = 0; }
@@ -379,6 +390,58 @@ static int cmd_move(int32_t delta)
     return 0;
 }
 
+static int cmd_home(int8_t method)
+{
+    signal(SIGINT, on_sigint);
+
+    /* homing parameters (SDO; none of these are in the PDO) */
+    uint32_t vfast = HOME_SPEED_FAST, vslow = HOME_SPEED_SLOW, acc = HOME_ACCEL;
+    int32_t off = HOME_OFFSET;
+    sdo_write(SLAVE, 0x6098, 0, &method, 1);          /* homing method */
+    sdo_write(SLAVE, 0x6099, 1, &vfast, 4);           /* speed: search for switch */
+    sdo_write(SLAVE, 0x6099, 2, &vslow, 4);           /* speed: search for zero (slow latch) */
+    sdo_write(SLAVE, 0x609A, 0, &acc, 4);             /* homing acceleration */
+    sdo_write(SLAVE, 0x607C, 0, &off, 4);             /* home offset */
+
+    if (!bus_enter_op()) return 1;
+    if (!cia402_enable(MODE_HOME)) {
+        uint16_t sw = bus_statusword();
+        fprintf(stderr, "enable failed: status=0x%04X (%s)\n", sw, cia402_state(sw));
+        bus_report_state("home enable failed");
+        return 1;
+    }
+    printf("Homing (method %d). Searching for the sensor flag... Ctrl-C to abort.\n", method);
+
+    bus_set_controlword(CW_ENABLE_OP);                /* bit4 low first */
+    bus_set_mode(MODE_HOME);
+    bus_cycle();
+
+    int done = 0, err = 0, tick = 0;
+    for (int i = 0; i < 15000 && g_run && !done && !err; i++) {   /* up to ~30 s */
+        bus_set_controlword(CW_ENABLE_OP | CW_NEW_SETPOINT);      /* bit4 = "homing start" */
+        bus_set_mode(MODE_HOME);
+        bus_cycle();
+        uint16_t sw = bus_statusword();
+        if (sw & SW_HOMING_ERROR) err = 1;
+        else if ((sw & SW_HOMING_ATTAINED) && (sw & SW_TARGET_REACHED)) done = 1;
+        if (++tick % 250 == 0) { printf("\r  searching... pos=%d   ", bus_position_actual()); fflush(stdout); }
+        usleep(2000);
+    }
+    bus_set_controlword(CW_ENABLE_OP);                /* drop homing-start */
+    bus_cycle();
+
+    if (done)
+        printf("\nHOMED. position now %d (= home offset %d).\n", bus_position_actual(), HOME_OFFSET);
+    else if (err) {
+        fprintf(stderr, "\nHOMING ERROR: status=0x%04X\n", bus_statusword());
+        bus_report_state("homing error");
+    } else
+        fprintf(stderr, "\nhoming did not complete (timeout/abort)\n");
+
+    cia402_disable();
+    return done ? 0 : 1;
+}
+
 /* ---- dispatch ----------------------------------------------------------- */
 static void usage(const char *p)
 {
@@ -393,7 +456,8 @@ static void usage(const char *p)
         "  %s <ifname> enable                 (energize at zero velocity; no motion)\n"
         "  %s <ifname> spin <counts/s>        (PV mode; 10000 = 1 rev/s)\n"
         "  %s <ifname> move <counts>          (PP relative move; 10000 = 1 rev)\n"
-        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p, p, p, p);
+        "  %s <ifname> home [method]          (homing; default method %d)\n"
+        "  type = u8|u16|u32|i8|i16|i32\n", p, p, p, p, p, p, p, p, p, p, HOME_METHOD);
 }
 
 int main(int argc, char **argv)
@@ -420,6 +484,9 @@ int main(int argc, char **argv)
         rc = cmd_spin((int32_t)strtol(argv[3], NULL, 0));
     } else if (!strcmp(cmd, "move") && argc == 4) {
         rc = cmd_move((int32_t)strtol(argv[3], NULL, 0));
+    } else if (!strcmp(cmd, "home")) {
+        int8_t method = (argc == 4) ? (int8_t)strtol(argv[3], NULL, 0) : HOME_METHOD;
+        rc = cmd_home(method);
     } else if (!strcmp(cmd, "sdo") && argc >= 4) {
         const char *op = argv[3];
         if (!strcmp(op, "get") && argc == 7) {
