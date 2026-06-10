@@ -366,10 +366,13 @@ static int cmd_move(int32_t delta)
 {
     signal(SIGINT, on_sigint);
 
-    uint32_t pv = 10000, acc = 100000, dec = 100000; /* slow: 1 rev/s profile (not in PDO) */
-    sdo_write(SLAVE, 0x6081, 0, &pv, 4);             /* profile velocity */
-    sdo_write(SLAVE, 0x6083, 0, &acc, 4);            /* profile acceleration */
-    sdo_write(SLAVE, 0x6084, 0, &dec, 4);            /* profile deceleration */
+    /* Profile dynamics are left to the drive so they can be tuned live with
+     * `sdo set` (6081 velocity, 6083/6084 accel/decel). Report what's in effect. */
+    uint32_t pv = 0, acc = 0, dec = 0;
+    sdo_read(SLAVE, 0x6081, 0, &pv, 4);
+    sdo_read(SLAVE, 0x6083, 0, &acc, 4);
+    sdo_read(SLAVE, 0x6084, 0, &dec, 4);
+    printf("profile: velocity=%u accel=%u decel=%u (tune via 'sdo set')\n", pv, acc, dec);
 
     if (!bus_enter_op()) return 1;
     if (!cia402_enable(MODE_PP)) {
