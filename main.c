@@ -66,8 +66,8 @@
 /* Homing defaults (tune during bring-up; method also overridable on the CLI) */
 #define HOME_METHOD           21       /* home-switch only, no index (mid-travel flag) */
 #define HOME_SPEED_FAST       10000    /* 6099:1 search-for-switch, counts/s (1 rev/s) */
-#define HOME_SPEED_SLOW       2000     /* 6099:2 latch speed, counts/s (slow = repeatable) */
-#define HOME_ACCEL            50000    /* 609Ah */
+#define HOME_SPEED_SLOW       500     /* 6099:2 latch speed, counts/s (slow = repeatable) */
+#define HOME_ACCEL            5000    /* 609Ah */
 #define HOME_OFFSET           0        /* 607Ch: counts from latched edge to station 0 */
 
 static volatile sig_atomic_t g_run = 1;
